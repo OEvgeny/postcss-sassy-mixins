@@ -67,8 +67,13 @@ var defineMixin = function (result, mixins, rule) {
     var parsed = parseNameAndArgs(rule.params, rule),
         args = [];
 
+    var isVariableArgs = false
     if (parsed.args) {
-        args = postcss.list.comma(parsed.args).map(function(str) {
+        if (parsed.args.indexOf('...') != -1) {
+          parsed.args = parsed.args.replace('...', '');
+          isVariableArgs = true
+        }
+        args = postcss.list.comma(parsed.args).map(function(str, index) {
             var arg = str.split(':', 1)[0];
             var defaults = str.slice(arg.length + 1);
             return [arg.slice(1).trim(), defaults.trim()];
@@ -81,7 +86,7 @@ var defineMixin = function (result, mixins, rule) {
         return false;
     });
 
-    mixins[parsed.name] = { mixin: rule, args: args, content: content };
+    mixins[parsed.name] = { mixin: rule, args: args, content: content, varArgs: isVariableArgs};
     rule.removeSelf();
 };
 
@@ -89,12 +94,18 @@ var insertMixin = function (result, mixins, rule, opts) {
     var parsed = parseNameAndArgs(rule.params, rule),
         params = [];
 
-    if (parsed.args) {
-        params = postcss.list.comma(parsed.args);
-    }
-
     var def = mixins[parsed.name];
     var mixin = def && def.mixin;
+
+    if (parsed.args) {
+        params = postcss.list.comma(parsed.args).map(function(str) {
+            var arr = str.split(':');
+            var l = arr.length;
+            var arg = arr[l - 2] || '';
+            var val = arr[l - 1] || '';
+            return [arg.slice(1).trim(), val.trim()];
+        });
+    }
 
     if (!def) {
         if ( !opts.silent ) {
@@ -103,10 +114,16 @@ var insertMixin = function (result, mixins, rule, opts) {
     }
     else if (mixin.name === 'mixin') {
         var values = { };
-        for ( var i = 0; i < def.args.length; i++ ) {
-            values[ def.args[i][0] ] = params[i] || def.args[i][1];
-        }
 
+        for ( var i = 0; i < def.args.length; i++ ) {
+          values[ def.args[i][0] ] = def.args[i][1];
+        }
+        for ( var i = 0; i < params.length; i++ ) {
+          values[ params[i][0] || def.args[i] && def.args[i][0] || i ] = params[i][1]
+        }
+        if (def.varArgs) {
+          values[ def.args[0][0] ] = params.map(function(p) {return p[0] ? '' : p[1]}).join(' ');
+        }
         var clones = [];
         for ( i = 0; i < mixin.nodes.length; i++ ) {
             clones.push( mixin.nodes[i].clone() );
@@ -122,6 +139,7 @@ var insertMixin = function (result, mixins, rule, opts) {
                 place.replaceWith(rule.nodes);
             });
         }
+
         rule.parent.insertBefore(rule, clones);
     }
     else if ( typeof mixin === 'object' ) {
@@ -135,7 +153,13 @@ var insertMixin = function (result, mixins, rule, opts) {
         }
     }
 
-    if ( rule.parent ) rule.removeSelf();
+    if ( rule.parent ) {
+      var parent = rule.parent
+      rule.remove();
+      parent.eachAtRule('include', function (rule) {
+        insertMixin(result, mixins, rule, opts);
+      });
+    }
 };
 
 module.exports = postcss.plugin('postcss-sassy-mixins', function (opts) {
